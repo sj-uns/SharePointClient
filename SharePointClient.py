@@ -62,7 +62,7 @@ class SharePointClient:
         }
 
         auth_url = f"https://accounts.accesscontrol.windows.net/{self.tenant_id}/tokens/OAuth/2"
-        auth_response = requests.post(auth_url, data=auth_body, headers=auth_headers, verify=False)
+        auth_response = requests.post(auth_url, data=auth_body, headers=auth_headers)
 
         auth_response.raise_for_status()
         token_result = auth_response.json()
@@ -110,7 +110,7 @@ class SharePointClient:
         api_url = rf"{self.site_url}/sites/{self.sp_site}/_api/Web/GetFolderByServerRelativeUrl('{sp_folder_url}')?$expand=Folders,Files"
 
         # Make the request to SharePoint API, to return the contents of the folder
-        api_response = requests.get(api_url, headers=api_headers, verify=False)
+        api_response = requests.get(api_url, headers=api_headers)
         api_response.raise_for_status()  # Check response is valid (e.g. 200 == OK)
         api_result = api_response.json()
 
@@ -145,20 +145,14 @@ class SharePointClient:
         return file_list
     
 
-    def download_sp_file(self, sp_file_url:str, target_dir:str, flatten:bool = False):
+    def download_sp_file(self, sp_file_url:str, target_dir:str):
         """
         Download a file from SharePoint using its server-relative URL and save it to the target location.
-
-        This method retrieves a file from a SharePoint site and saves it to a specified local directory. The file can
-        be saved either with the directory structure preserved or flattened into a single directory, based on the
-        `flatten` parameter.
 
         Args:
             sp_file_url (str): The server-relative URL of the file in SharePoint. It should include the path from
                             the base SharePoint site URL, such as '/sites/MySite/Shared Documents/folder/file_name.ext'.
             target_dir (str): The local directory path where the file will be saved.
-            flatten (bool, optional): If True, save the file directly in the target directory, flattening the directory structure.
-                                    If False, preserve the directory structure. (default is False)
 
         Returns:
             file_path (str): The target path where the file is saved.
@@ -168,29 +162,20 @@ class SharePointClient:
             OSError: If there's an error creating the directory or saving the file.
         """
 
-        # Get the base path
-        base_path = f'/sites/{self.sp_site}/Shared Documents'
-
         # Construct API request URL
-        api_url = f'{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl("{sp_file_url}")/$value'
+        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/$value"
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Accept': 'application/json;odata=verbose'
         }
 
         # Make the request to SharePoint API, to return the file binary
-        response = requests.get(api_url, headers=headers, verify=False, stream=True)
+        response = requests.get(api_url, headers=headers, stream=True)
         response.raise_for_status()  # Check response is valid (e.g. 200 == OK)
 
-        # Determine the file name and relative path
+        # Determine the file name and path
         file_name = os.path.basename(sp_file_url)
-        if not flatten:
-            # Preserve the directory structure
-            rel_path = os.path.relpath(sp_file_url, base_path).replace('\\', '/')
-            file_path = os.path.join(target_dir, rel_path)
-        else:
-            # Flatten the directory structure
-            file_path = os.path.join(target_dir, file_name)
+        file_path = os.path.join(target_dir, file_name)
 
         # Ensure the target directory exists
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -202,3 +187,189 @@ class SharePointClient:
 
         print(f"File downloaded successfully to {file_path}")
         return file_path
+    
+
+    def download_sp_folder(self, sp_folder_url:str, target_dir:str, flatten:bool = False, max_depth:int = -1):
+        """
+        Download the contents of a folder from SharePoint using its server-relative URL and save them to the target location.
+
+        This method retrieves the files from a folder and subfolders in a SharePoint site and saves it to a specified local directory.
+        The file(s) can be saved either with the directory structure preserved or flattened into a single directory, based on the
+        `flatten` parameter.
+
+        Args:
+            sp_folder_url (str): The server-relative URL of the file in SharePoint. It should include the path from
+                                    the base SharePoint site URL (e.g., '/sites/MySite/Shared Documents/folder_name')
+            target_dir (str): The local directory path where the file will be saved.
+            flatten (bool, optional): If True, save the file directly in the target directory, flattening the directory structure.
+                                    If False, preserve the directory structure. (default is False)
+            max_depth (int, optional): The maximum depth to recurse into subfolders. (default is -1, meaning scan entire directory)
+
+        Returns:
+            files_downloaded (list): A list of dictionaries containing the details of the downloaded files.
+        """
+
+        # Initialise files_downloaded list
+        files_downloaded = []
+
+        # Get the list of files in the SharePoint folder
+        files_to_get = self.get_sp_folder_contents(sp_folder_url=sp_folder_url, max_depth=max_depth)
+
+        # Loop through the list of files and download each file to the target directory, based on the flatten parameter
+        for file in files_to_get:
+            if not flatten:
+                target_path =\
+                    self.download_sp_file(sp_file_url=file['server_relative_url'], target_dir=os.path.join(target_dir, os.path.dirname(file['rel_path'])))
+            else:
+                target_path =\
+                    self.download_sp_file(sp_file_url=file['server_relative_url'], target_dir=target_dir)
+
+            files_downloaded.append({
+                'file_details': file,
+                'target_path': target_path
+            })
+
+        print(f"Downloaded {len(files_downloaded)} files to {target_dir}")
+        return files_downloaded
+    
+
+    def check_sp_folder_exists(self, sp_folder_url:str):
+        """
+        Check if a folder exists in SharePoint using its server-relative URL.
+
+        Args:
+            sp_folder_url (str): The server-relative URL of the folder in SharePoint. It should include the path from
+                            the base SharePoint site URL, such as '/sites/MySite/Shared Documents/folder/file_name.ext'.
+
+        Returns:
+            bool: True if the folder exists, False otherwise.
+
+        Raises:
+            requests.HTTPError: If the request to SharePoint fails.
+        """
+
+        # Initialise variable to return if the folder exists
+        exists = False
+
+        # Construct the API request URL
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Accept': 'application/json;odata=verbose',
+        }
+
+        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFolderByServerRelativeUrl('{sp_folder_url}')"
+
+        # Make the request to SharePoint API, to check if the folder exists
+        response = requests.get(api_url, headers=headers)
+
+        if response.status_code == 200:
+            exists = True
+        elif response.status_code == 404:
+            exists = False
+            response.raise_for_status()
+        else:
+            print(f"Error: {response.status_code} - {response.text}")
+
+        return exists
+    
+
+    def create_sp_folder(self, new_folder_url:str):
+        """
+        Create a folder in SharePoint using a server-relative URL.
+
+        Args:
+            new_folder_url (str): The server-relative URL of the folder to be created in SharePoint. It should include the path from
+                            the base SharePoint site URL, such as '/sites/MySite/Shared Documents/folder/file_name.ext'.
+
+        Returns:
+            bool: True if the folder has been created, False otherwise.
+
+        Raises:
+            requests.HTTPError: If the request to SharePoint fails.
+        """
+
+        # Check if the folder already exists
+        if self.check_sp_folder_exists(new_folder_url):
+            print(f"Folder '{new_folder_url}' already exists.")
+            return False
+
+        created = False
+
+        # Construct the API request URL
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/json;odata=verbose",
+            "Content-Type": "application/json;odata=verbose"
+            }
+        
+        payload = {
+            "__metadata": { "type": "SP.Folder" },
+            "ServerRelativeUrl": new_folder_url
+            }
+        
+        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/folders"
+
+        # Make the request to SharePoint API, to create the folder
+        response = requests.post(api_url, headers=headers, json=payload)
+
+        if response.status_code == 201:
+            print(f"Folder '{new_folder_url}' created successfully.")
+            created = True
+        else:
+            print(f"Error: {response.status_code} - {response.text}")
+            created = False
+            response.raise_for_status()
+
+        return created
+
+
+    def move_sp_file(self, sp_file_url:str, target_folder_url:str, overwrite_flag:int = 1):
+        """
+        Move a file in SharePoint using its server-relative URL to the target folder server-relative URL.
+        This will create the target folder if it does not exist.
+
+        Args:
+            sp_file_url (str): The server-relative URL of the file in SharePoint. It should include the path from
+                            the base SharePoint site URL, such as '/sites/MySite/Shared Documents/folder/file_name.ext'.
+            target_folder_url (str): The server-relative URL folder path where the file will be saved. It should include the path from
+                            the base SharePoint site URL, such as '/sites/MySite/Shared Documents/folder'.
+            overwrite_flag (int, optional): The overwrite flag to use when moving the file. Can be 0 (Do Not Overwrite) or 1 (Overwrite).
+
+        Returns:
+            file_path (str): The target path where the file is saved.
+
+        Raises:
+            requests.HTTPError: If the move request to SharePoint fails.
+        """
+
+        # Check if the target folder exists, if not then create the folder
+        if not self.check_sp_folder_exists(target_folder_url):
+            self.create_sp_folder(target_folder_url)
+
+        # Construct the new file path
+        target_file_url = os.path.join(target_folder_url, os.path.basename(sp_file_url))
+
+        # Construct API request URL
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Accept': 'application/json;odata=verbose',
+            'Content-Type': 'application/json;odata=verbose'
+        }
+
+        payload = {
+            'newUrl': target_file_url,
+            'flags': overwrite_flag
+        }
+
+        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/moveTo"
+
+        # Make the request to SharePoint API, to move the file
+        response = requests.post(api_url, headers=headers, json=payload)
+
+        # Check response is valid (e.g. 200 == OK)
+        if response.status_code != 200:
+            print(response.content)
+            response.raise_for_status()
+
+        print(f"File moved successfully to {target_file_url}")
+        return target_file_url
