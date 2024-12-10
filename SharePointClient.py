@@ -37,10 +37,20 @@ class SharePointClient:
         self.site_url = f'https://{tenant}.sharepoint.com' # Create the SharePoint Site URL
         self.access_token = self.get_access_token() # Initialise and store the access token
 
+        # Create a session object for the API calls
+        self.session = requests.Session()
+        
+        # Define the default headers for the session
+        self.session.headers.update({
+            'Authorization': f'Bearer {self.access_token}',
+            'Accept': 'application/json;odata=verbose',
+            'Content-Type': 'application/json;odata=verbose'
+        })
 
-    def get_access_token(self):
+
+    def get_access_token(self) -> str:
         """
-        Retrieve an access token for authenticating with SharePoint.
+        Retrieve an OAuth2 Access Token for authenticating with SharePoint.
 
         Returns:
             access_token (str): The access token.
@@ -51,7 +61,7 @@ class SharePointClient:
 
         # Get Access Token
         auth_body = {
-            'grant_type':'client_credentials',
+            'grant_type': 'client_credentials',
             'resource': f'00000003-0000-0ff1-ce00-000000000000/{self.tenant}.sharepoint.com@{self.tenant_id}', 
             'client_id': self.client_id,
             'client_secret': self.client_secret,
@@ -71,7 +81,7 @@ class SharePointClient:
         return access_token
 
 
-    def get_sp_folder_contents(self, sp_folder_url:str, max_depth:int = -1, _depth:int = 0, _base_path:str = None):
+    def get_sp_folder_contents(self, sp_folder_url:str, max_depth:int = -1, _depth:int = 0, _base_path:str = None) -> list:
         """
         Recursively retrieve the files from a SharePoint directory.
         If max_depth is set to 0, the entire directory structure will be scanned.
@@ -101,22 +111,16 @@ class SharePointClient:
             _base_path = sp_folder_url
 
         # Construct API request URL
-        api_headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Accept':'application/json;odata=verbose',
-            'Content-Type': 'application/json;odata=verbose'
-        }
-
-        api_url = rf"{self.site_url}/sites/{self.sp_site}/_api/Web/GetFolderByServerRelativeUrl('{sp_folder_url}')?$expand=Folders,Files"
+        url = rf"{self.site_url}/sites/{self.sp_site}/_api/Web/GetFolderByServerRelativeUrl('{sp_folder_url}')?$expand=Folders,Files"
 
         # Make the request to SharePoint API, to return the contents of the folder
-        api_response = requests.get(api_url, headers=api_headers)
-        api_response.raise_for_status()  # Check response is valid (e.g. 200 == OK)
-        api_result = api_response.json()
+        response = self.session.get(url=url, headers=self.session.headers)
+        response.raise_for_status()
+        result = response.json()
 
         # Extract Files and Folders
-        files = api_result['d']['Files']['results']
-        folders = api_result['d']['Folders']['results']
+        files = result['d']['Files']['results']
+        folders = result['d']['Folders']['results']
 
         # Prepare the list of files
         file_list = []
@@ -124,9 +128,10 @@ class SharePointClient:
         # Add files to the file_list
         for file in files:
             file_list.append({
-                'name': file['Name'],
+                'file_name': file['Name'],
+                'file_size': file['Length'],
                 'sp_site': self.sp_site,
-                'rel_path': os.path.relpath(file['ServerRelativeUrl'], base_path).replace('\\', '/'),
+                'rel_path': os.path.relpath(file['ServerRelativeUrl'], _base_path).replace('\\', '/'),
                 'server_relative_url': file['ServerRelativeUrl'],
                 'sp_url_path': self.site_url + file['ServerRelativeUrl'],
                 'file_depth': _depth  # Depth of the file from the root folder as int
@@ -137,7 +142,7 @@ class SharePointClient:
         if max_depth == -1 or _depth < max_depth:
             for folder in folders:
                 subfolder_url = folder['ServerRelativeUrl']
-                subfolder_contents = self.get_sp_folder_contents(sp_folder_url=subfolder_url, max_depth=max_depth, _depth=_depth + 1)
+                subfolder_contents = self.get_sp_folder_contents(sp_folder_url=subfolder_url, max_depth=max_depth, _depth=_depth + 1, _base_path=_base_path)
                 
                 # Add the subfolder files to the file_list
                 file_list.extend(subfolder_contents)
@@ -145,7 +150,7 @@ class SharePointClient:
         return file_list
     
 
-    def download_sp_file(self, sp_file_url:str, target_dir:str):
+    def download_sp_file(self, sp_file_url:str, target_dir:str) -> str:
         """
         Download a file from SharePoint using its server-relative URL and save it to the target location.
 
@@ -163,14 +168,10 @@ class SharePointClient:
         """
 
         # Construct API request URL
-        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/$value"
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Accept': 'application/json;odata=verbose'
-        }
+        url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/$value"
 
         # Make the request to SharePoint API, to return the file binary
-        response = requests.get(api_url, headers=headers, stream=True)
+        response = self.session.get(url=url, headers=self.session.headers, stream=True)
         response.raise_for_status()  # Check response is valid (e.g. 200 == OK)
 
         # Determine the file name and path
@@ -189,7 +190,7 @@ class SharePointClient:
         return file_path
     
 
-    def download_sp_folder(self, sp_folder_url:str, target_dir:str, flatten:bool = False, max_depth:int = -1):
+    def download_sp_folder(self, sp_folder_url:str, target_dir:str, flatten:bool = False, max_depth:int = -1) -> list:
         """
         Download the contents of a folder from SharePoint using its server-relative URL and save them to the target location.
 
@@ -233,7 +234,7 @@ class SharePointClient:
         return files_downloaded
     
 
-    def check_sp_folder_exists(self, sp_folder_url:str):
+    def check_sp_folder_exists(self, sp_folder_url:str) -> bool:
         """
         Check if a folder exists in SharePoint using its server-relative URL.
 
@@ -248,32 +249,28 @@ class SharePointClient:
             requests.HTTPError: If the request to SharePoint fails.
         """
 
-        # Initialise variable to return if the folder exists
-        exists = False
-
         # Construct the API request URL
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Accept': 'application/json;odata=verbose',
-        }
+        url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFolderByServerRelativeUrl('{sp_folder_url}')"
 
-        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFolderByServerRelativeUrl('{sp_folder_url}')"
+        try:
+            # Make the request to SharePoint API, to check if the folder exists
+            response = self.session.get(url, headers=self.session.headers)
 
-        # Make the request to SharePoint API, to check if the folder exists
-        response = requests.get(api_url, headers=headers)
-
-        if response.status_code == 200:
-            exists = True
-        elif response.status_code == 404:
-            exists = False
-            response.raise_for_status()
-        else:
-            print(f"Error: {response.status_code} - {response.text}")
-
-        return exists
+            if response.status_code == 200:
+                return True
+            elif response.status_code == 404:
+                return False
+            else:
+                response.raise_for_status()
+        except requests.HTTPError as http_err:
+            print(f"HTTP Error occurred: {http_err} | Folder URL: {sp_folder_url} | Status Code: {response.status_code if 'response' in locals() else 'N/A'}")
+            raise
+        except Exception as err:
+            print(f"An unexpected error occurred: {err} | Folder URL: {sp_folder_url}")
+            raise
     
 
-    def create_sp_folder(self, new_folder_url:str):
+    def create_sp_folder(self, new_folder_url:str) -> bool:
         """
         Create a folder in SharePoint using a server-relative URL.
 
@@ -293,37 +290,34 @@ class SharePointClient:
             print(f"Folder '{new_folder_url}' already exists.")
             return False
 
-        created = False
-
         # Construct the API request URL
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Accept": "application/json;odata=verbose",
-            "Content-Type": "application/json;odata=verbose"
-            }
+        url = f"{self.site_url}/sites/{self.sp_site}/_api/web/folders"
         
         payload = {
             "__metadata": { "type": "SP.Folder" },
             "ServerRelativeUrl": new_folder_url
             }
         
-        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/folders"
+        try:        
+            # Make the request to SharePoint API, to create the folder
+            response = self.session.post(url=url, headers=self.session.headers, json=payload)
 
-        # Make the request to SharePoint API, to create the folder
-        response = requests.post(api_url, headers=headers, json=payload)
+            # Check if the folder has been created; response = 201
+            if response.status_code == 201:
+                print(f"Folder '{new_folder_url}' created successfully.")
+                return True
+            else:
+                response.raise_for_status()
+        except requests.HTTPError as http_err:
+            print(f"HTTP Error occurred: {http_err} | Folder URL: {new_folder_url} | Status Code: {response.status_code if 'response' in locals() else 'N/A'}")
+            raise
+        except Exception as err:
+            print(f"An unexpected error occurred: {err} | Folder URL: {new_folder_url}")
+            raise
 
-        if response.status_code == 201:
-            print(f"Folder '{new_folder_url}' created successfully.")
-            created = True
-        else:
-            print(f"Error: {response.status_code} - {response.text}")
-            created = False
-            response.raise_for_status()
-
-        return created
 
 
-    def move_sp_file(self, sp_file_url:str, target_folder_url:str, overwrite_flag:int = 1):
+    def move_sp_file(self, sp_file_url:str, target_folder_url:str, overwrite_flag:int = 1) -> str:
         """
         Move a file in SharePoint using its server-relative URL to the target folder server-relative URL.
         This will create the target folder if it does not exist.
@@ -350,26 +344,22 @@ class SharePointClient:
         target_file_url = os.path.join(target_folder_url, os.path.basename(sp_file_url))
 
         # Construct API request URL
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Accept': 'application/json;odata=verbose',
-            'Content-Type': 'application/json;odata=verbose'
-        }
-
+        url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/moveTo"
+        
         payload = {
             'newUrl': target_file_url,
             'flags': overwrite_flag
         }
 
-        api_url = f"{self.site_url}/sites/{self.sp_site}/_api/web/GetFileByServerRelativeUrl('{sp_file_url}')/moveTo"
-
-        # Make the request to SharePoint API, to move the file
-        response = requests.post(api_url, headers=headers, json=payload)
-
-        # Check response is valid (e.g. 200 == OK)
-        if response.status_code != 200:
-            print(response.content)
+        try:
+            # Make the request to SharePoint API, to move the file
+            response = self.session.post(url=url, headers=self.session.headers, json=payload)
             response.raise_for_status()
-
-        print(f"File moved successfully to {target_file_url}")
-        return target_file_url
+            print(f"File moved successfully to {target_file_url}")
+            return target_file_url
+        except requests.HTTPError as http_err:
+            print(f"HTTP Error occurred: {http_err} | Status Code: {response.status_code if 'response' in locals() else 'N/A'}")
+            raise
+        except Exception as err:
+            print(f"An unexpected error occurred: {err}")
+            raise
